@@ -2,12 +2,10 @@ import matplotlib.pylab as plt
 import numpy as np
 from astropy.cosmology import FlatLambdaCDM
 from scipy.ndimage import map_coordinates, rotate, shift
-import multiprocess as mp
-from shapely import Polygon, Point, points
-from shapely.prepared import prep
 from astropy.io import fits
-from tqdm import tqdm
 from matplotlib import path
+from numba import jit
+import numba as nb
 
 def open_fits(file_name):
     data = fits.open(file_name)[0].data
@@ -93,9 +91,8 @@ def list_of_points_from_grid(grid):
     :return: flattened grid
     :rtype: numpy.ndarray
     """
-    grid_points = np.swapaxes(grid,0,2)
-    grid_points = np.swapaxes(grid_points,0,1)
-    grid_points = np.concatenate(grid_points)
+    grid_points = np.transpose(grid,(1,2,0))
+    grid_points = np.reshape(grid_points,(-1,2))
 
     return grid_points
 
@@ -139,7 +136,39 @@ def grid(center,num_pix,pixel_scale):
     y = np.linspace(y_center + fov / 2 - pixel_scale / 2 , y_center - fov / 2 + pixel_scale / 2, int(fov / pixel_scale))
     return np.meshgrid(x, y)
 
-def ray_trace(deflections_grid, x_deflections, y_deflections, image_plane, z1, z2):
+def ray_trace_points(deflections_grid, x_deflections, y_deflections, points, z1=None, z2=None):
+    """
+    Trace a list of points from the image plane to the source plane
+
+    :param deflections_grid: coordinate grid on which the deflection angles are defined
+    :type deflections_grid: numpy.ndarray
+    :param x_deflections: x component of the deflection angles
+    :type x_deflections: numpy.ndarray
+    :param y_deflections: y component of the deflection angles
+    :type y_deflections: numpy.ndarray
+    :param points: list of points to trace
+    :type points: numpy.ndarray
+    :param z1: redshift of the lens
+    :type z1: float
+
+    :return: list of traced points
+    :rtype: numpy.ndarray
+    """
+    
+    # compute deflection angle scale factor
+    scale_factor = deflection_angle_scale_factor(z1,z2) if z1 is not None and z2 is not None else 1
+
+    deflections_grid_points = list_of_points_from_grid(deflections_grid)
+
+    # perform ray tracing by interpolating deflection angles
+    traced_points_x = points[:,0] - scale_factor*fast_griddata(points=deflections_grid_points, values=x_deflections.flatten(), xi=points)
+    traced_points_y = points[:,1] - scale_factor*fast_griddata(points=deflections_grid_points, values=y_deflections.flatten(), xi=points)
+
+    return np.transpose(np.array([traced_points_x,traced_points_y]))
+
+
+
+def ray_trace_grid(deflections_grid, x_deflections, y_deflections, image_plane, z1=None, z2=None):
     """
     Trace a grid of coordinates from the image plane to the source plane
 
@@ -161,15 +190,15 @@ def ray_trace(deflections_grid, x_deflections, y_deflections, image_plane, z1, z
     """
 
     # compute deflection angle scale factor
-    scale_factor = deflection_angle_scale_factor(z1,z2)
+    scale_factor = deflection_angle_scale_factor(z1,z2) if z1 is not None and z2 is not None else 1
 
     # convert coordinate grids into list of points
     image_plane_points = list_of_points_from_grid(image_plane)
     deflections_grid_points = list_of_points_from_grid(deflections_grid)
 
     # perform ray tracing by interpolating deflection angles
-    traced_points_x = image_plane_points[:,0] - scale_factor*fast_griddata(points=deflections_grid_points, values=np.concatenate(x_deflections), xi=image_plane_points)
-    traced_points_y = image_plane_points[:,1] - scale_factor*fast_griddata(points=deflections_grid_points, values=np.concatenate(y_deflections), xi=image_plane_points)
+    traced_points_x = image_plane_points[:,0] - scale_factor*fast_griddata(points=deflections_grid_points, values=x_deflections.flatten(), xi=image_plane_points)
+    traced_points_y = image_plane_points[:,1] - scale_factor*fast_griddata(points=deflections_grid_points, values=y_deflections.flatten(), xi=image_plane_points)
 
     n = image_plane[0].shape[0]
     traced_points_x = np.reshape(traced_points_x, (n,n))
@@ -177,6 +206,41 @@ def ray_trace(deflections_grid, x_deflections, y_deflections, image_plane, z1, z
 
     return traced_points_x, traced_points_y
 
+@jit(nopython=True)
+def get_nonempty_pixels(traced_corners,source_x_range,source_y_range):     
+    image_pix = traced_corners.shape[0]-1
+    nonempty_pixels = []
+    for i in range(image_pix):
+        for j in range(image_pix):
+            top_left = traced_corners[i,j]
+            if (top_left[1] < source_y_range[1]) and (top_left[1] > source_y_range[0]) and (top_left[0] < source_x_range[1]) and (top_left[0] > source_x_range[0]):
+                nonempty_pixels.append((i,j))
+
+    return nonempty_pixels
+
+def get_traced_pixels(source_grid,traced_corners_grid):
+    """
+    
+    """
+    source_plane = np.transpose(a=source_grid,axes=(1,2,0))
+    traced_corners = np.transpose(a=traced_corners_grid,axes=(1,2,0))
+
+    y = source_plane[:,0,1]
+    x = source_plane[0,:,0]
+    source_x_range = [np.min(x),np.max(x)]
+    source_y_range = [np.min(y),np.max(y)]
+    nonempty_pixels = get_nonempty_pixels(traced_corners,nb.typed.List(source_x_range),nb.typed.List(source_y_range))
+    polygons = []
+
+    for r in range(len(nonempty_pixels)):
+        i, j = nonempty_pixels[r]
+        top_left = traced_corners[i,j]
+        top_right = traced_corners[i+1,j]
+        bottom_right = traced_corners[i+1,j+1]
+        bottom_left = traced_corners[i,j+1]
+        polygons.append([top_left,top_right,bottom_right,bottom_left])
+
+    return np.array(polygons)
 
 def lens_image(source_image,source_grid,traced_corners_grid,func=np.mean):
     """
@@ -186,7 +250,7 @@ def lens_image(source_image,source_grid,traced_corners_grid,func=np.mean):
     :type source_image: numpy.ndarray
     :param source_grid: grid of source plane coordinates
     :type source_grid: numpy.ndarray
-    :param traced_corners_grid: grid of source plane coordinates of the corners of the image plane
+    :param traced_corners_grid: grid of source plane coordinates of the corners of each pixel on the image plane
     :type traced_corners_grid: numpy.ndarray
     :param func: function used to compute the luminosity of a pixel
     :type func: function
@@ -194,16 +258,21 @@ def lens_image(source_image,source_grid,traced_corners_grid,func=np.mean):
     :return: lensed image
     :rtype: numpy.ndarray
     """
-    source_plane = np.swapaxes(np.swapaxes(source_grid,0,2),0,1)
-    traced_corners = np.swapaxes(np.swapaxes(traced_corners_grid,0,2),0,1)
+    source_plane = np.transpose(a=source_grid,axes=(1,2,0))
+    traced_corners = np.transpose(a=traced_corners_grid,axes=(1,2,0))
     
     y = source_plane[:,0,1]
     x = source_plane[0,:,0]
     source_x_range = [np.min(x),np.max(x)]
     source_y_range = [np.min(y),np.max(y)]
+    
+    nonempty_pixels = get_nonempty_pixels(traced_corners,nb.typed.List(source_x_range),nb.typed.List(source_y_range))
+    image_pix = traced_corners.shape[0]-1
 
-    def luminosity(index):
-        i, j = index
+    image = np.zeros((image_pix,image_pix))
+
+    for r in range(len(nonempty_pixels)):
+        i, j = nonempty_pixels[r]
         top_left = traced_corners[i,j]
         top_right = traced_corners[i+1,j]
         bottom_right = traced_corners[i+1,j+1]
@@ -211,7 +280,7 @@ def lens_image(source_image,source_grid,traced_corners_grid,func=np.mean):
 
         vertices = [top_left,top_right,bottom_right,bottom_left]
 
-        traced_pixel = prep(Polygon(vertices))
+        traced_pixel = path.Path(vertices)
 
         # compute bounding box
         x_min = min([v[0] for v in vertices])
@@ -224,45 +293,22 @@ def lens_image(source_image,source_grid,traced_corners_grid,func=np.mean):
 
         image_slice = source_image[y_index_range[0]:y_index_range[1]+1,x_index_range[0]:x_index_range[1]+1]
         if image_slice.size == 0:
-            return 0
+            image[i,j] = 0
         else:
             source_plane_slice = source_plane[y_index_range[0]:y_index_range[1]+1,x_index_range[0]:x_index_range[1]+1]
-            source_points = np.stack((source_plane_slice[:,:,0],source_plane_slice[:,:,1],image_slice))
-            source_points = np.swapaxes(source_points,0,2)
-            source_points = np.swapaxes(source_points,0,1)
-            source_points = points(np.concatenate(source_points))
+            source_points = np.reshape(source_plane_slice,(-1,2))
 
-            source_pixels = []
-            source_pixels.extend(filter(traced_pixel.contains,source_points))
-            if len(source_pixels) == 0:
-                return 0
+            index = traced_pixel.contains_points(source_points)
+            luminosity_values = image_slice.flatten()[index]
+            if len(luminosity_values) == 0:
+                image[i,j] = 0
             else:
-                return func([p.z for p in source_pixels])
-            
-    image_pix = traced_corners.shape[0]-1
-    nonempty_pixels = []
-    for i in range(image_pix):
-        for j in range(image_pix):
-            top_left = traced_corners[i,j]
-            if (top_left[1] < source_y_range[1]) and (top_left[1] > source_y_range[0]) and (top_left[0] < source_x_range[1]) and (top_left[0] > source_x_range[0]):
-                nonempty_pixels.append((i,j))
-    
-    p = mp.Pool()
-    image = np.zeros((image_pix,image_pix))
-    res = p.map(luminosity,nonempty_pixels)
-
-    for i,r in enumerate(nonempty_pixels):
-        image[r] = res[i]
-    p.close()
-    p.join()
+                image[i,j] = func(luminosity_values)
     
     return image
 
 
 def plot_image(image,center,fov,ax=None,title=None,**kwargs):
-    """
-    
-    """
     x_center, y_center = center
     if ax is None: fig, ax = plt.subplots(1, 1, dpi=150)
     im = ax.imshow(
@@ -289,9 +335,9 @@ def plot_image(image,center,fov,ax=None,title=None,**kwargs):
     if title is not None: ax.set_title(title)
     return im
 
-def magnification_line(magnification_grid, magnification, image_plane):
+def magnification(magnification_grid, magnification_values, image_plane):
     """
-    Compute the magnification line of a given magnification value.
+    Interpolate the magnification on a grid of coordinates.
 
     :param magnification_grid: grid of magnifications
     :type magnification_grid: numpy.ndarray
@@ -303,4 +349,80 @@ def magnification_line(magnification_grid, magnification, image_plane):
     :return: magnification line
     :rtype: numpy.ndarray
     """
+    image_plane_points = list_of_points_from_grid(image_plane)
+    magnification_grid_points = list_of_points_from_grid(magnification_grid)
     
+    image_plane_magnification = fast_griddata(points=magnification_grid_points, values=magnification_values.flatten(), xi=image_plane_points)
+
+    return np.reshape(image_plane_magnification, (image_plane[0].shape[0],image_plane[0].shape[1]))
+
+def magnification_line(magnification_grid, magnification_values, image_plane,threshold=500):
+    image_plane_points = list_of_points_from_grid(image_plane)
+    image_plane_magnification = magnification(magnification_grid, magnification_values, image_plane)
+    return image_plane_points[image_plane_magnification.flatten() > threshold]
+
+def caustic(deflections_grid,x_deflections,y_deflections,magnification_grid, magnification_values, image_plane,z1, z2,threshold=500):
+    """
+    Compute the caustic curve of a lens.
+
+    :param magnification_grid: grid of magnifications
+    :type magnification_grid: numpy.ndarray
+    :param magnification: magnification value
+    :type magnification: float
+    :param image_plane: grid of image plane coordinates
+    :type image_plane: numpy.ndarray
+
+    :return: caustic curve
+    :rtype: numpy.ndarray
+    """
+    magnification_line_points = magnification_line(magnification_grid, magnification_values, image_plane,threshold=threshold)
+
+    # compute deflection angle scale factor
+    scale_factor = deflection_angle_scale_factor(z1,z2)
+
+    # convert coordinate grids into list of points
+    deflections_grid_points = list_of_points_from_grid(deflections_grid)
+
+    # perform ray tracing by interpolating deflection angles
+    traced_points_x = magnification_line_points[:,0] - scale_factor*fast_griddata(points=deflections_grid_points, values=x_deflections.flatten(), xi=magnification_line_points)
+    traced_points_y = magnification_line_points[:,1] - scale_factor*fast_griddata(points=deflections_grid_points, values=y_deflections.flatten(), xi=magnification_line_points)
+
+    return np.transpose(np.array([traced_points_x,traced_points_y]))
+
+def magnification_from_deflections(deflections_grid, x_deflections, y_deflections, image_plane, z1=None, z2=None):
+    """
+    Compute the magnification from the deflection angles.
+
+    :param x_deflections: x component of the deflection angles
+    :type x_deflections: numpy.ndarray
+    :param y_deflections: y component of the deflection angles
+    :type y_deflections: numpy.ndarray
+
+    :return: magnification
+    :rtype: numpy.ndarray
+    """
+    image_grid = np.transpose(a=image_plane,axes=(1,2,0))
+    y = image_grid[:,0,1]
+    x = image_grid[0,:,0]
+    traced_points_x, traced_points_y = ray_trace_grid(deflections_grid, x_deflections, y_deflections, image_plane, z1, z2)
+
+    # compute jacobian
+    dxdx = np.gradient(traced_points_x, x, axis=1)
+    dxdy = np.gradient(traced_points_x, y, axis=0)
+    dydx = np.gradient(traced_points_y, x, axis=1)
+    dydy = np.gradient(traced_points_y, y, axis=0)
+
+    return abs(1/(dxdx*dydy-dxdy*dydx))
+
+def convergence_from_deflections(deflections_grid, x_deflections, y_deflections, image_plane, z1=None, z2=None):
+
+    image_grid = np.transpose(a=image_plane,axes=(1,2,0))
+    y = image_grid[:,0,1]
+    x = image_grid[0,:,0]
+    traced_points_x, traced_points_y = ray_trace_grid(deflections_grid, x_deflections, y_deflections, image_plane, z1, z2)
+
+    # compute jacobian
+    dxdx = np.gradient(traced_points_x, x, axis=1)
+    dydy = np.gradient(traced_points_y, y, axis=0)
+
+    return 1-0.5*(dxdx+dydy)

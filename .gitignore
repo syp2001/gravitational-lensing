@@ -1,3 +1,7 @@
+0000_dx.fits
+0000_dy.fits
+Cropped-f200w.fits
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

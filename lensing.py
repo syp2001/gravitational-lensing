@@ -218,10 +218,34 @@ def get_nonempty_pixels(traced_corners,source_x_range,source_y_range):
 
     return nonempty_pixels
 
-def get_traced_pixels(source_grid,traced_corners_grid):
+def get_arc_pixels(source_grid,traced_corners_grid,image_grid):
     """
+    Returns the list of pixels on the image plane that fall on the source grid when traced back to the source plane.
+
+    :param source_grid: grid of source plane coordinates
+    :type source_grid: numpy.ndarray
+    :param traced_corners_grid: grid of source plane coordinates of the corners of each pixel on the image plane
+    :type traced_corners_grid: numpy.ndarray
+    :param image_grid: grid of image plane coordinates
+    :type image_grid: numpy.ndarray
+
+    :return: list of image plane pixels
+    """
+    source_plane = np.transpose(a=source_grid,axes=(1,2,0))
+    traced_corners = np.transpose(a=traced_corners_grid,axes=(1,2,0))
+    image_plane = np.transpose(image_grid,axes=(1,2,0))
     
-    """
+    y = source_plane[:,0,1]
+    x = source_plane[0,:,0]
+    source_x_range = [np.min(x),np.max(x)]
+    source_y_range = [np.min(y),np.max(y)]
+    
+    nonempty_pixels = get_nonempty_pixels(traced_corners,nb.typed.List(source_x_range),nb.typed.List(source_y_range))
+
+    return np.array([image_plane[index] for index in nonempty_pixels])
+
+
+def get_traced_pixels(source_grid,traced_corners_grid):
     source_plane = np.transpose(a=source_grid,axes=(1,2,0))
     traced_corners = np.transpose(a=traced_corners_grid,axes=(1,2,0))
 

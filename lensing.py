@@ -266,6 +266,70 @@ def get_traced_pixels(source_grid,traced_corners_grid):
 
     return np.array(polygons)
 
+def get_traced_luminosities(source_image,source_grid,traced_corners_grid):
+    """
+    Compute the lensed image of a source image.
+
+    :param source_image: image of the source
+    :type source_image: numpy.ndarray
+    :param source_grid: grid of source plane coordinates
+    :type source_grid: numpy.ndarray
+    :param traced_corners_grid: grid of source plane coordinates of the corners of each pixel on the image plane
+    :type traced_corners_grid: numpy.ndarray
+    :param func: function used to compute the luminosity of a pixel
+    :type func: function
+
+    :return: lensed image
+    :rtype: numpy.ndarray
+    """
+    source_plane = np.transpose(a=source_grid,axes=(1,2,0))
+    traced_corners = np.transpose(a=traced_corners_grid,axes=(1,2,0))
+    
+    y = source_plane[:,0,1]
+    x = source_plane[0,:,0]
+    source_x_range = [np.min(x),np.max(x)]
+    source_y_range = [np.min(y),np.max(y)]
+    
+    nonempty_pixels = get_nonempty_pixels(traced_corners,nb.typed.List(source_x_range),nb.typed.List(source_y_range))
+
+    lum = np.zeros(len(nonempty_pixels))
+
+    for r in range(len(nonempty_pixels)):
+        i, j = nonempty_pixels[r]
+        top_left = traced_corners[i,j]
+        top_right = traced_corners[i+1,j]
+        bottom_right = traced_corners[i+1,j+1]
+        bottom_left = traced_corners[i,j+1]
+
+        vertices = [top_left,top_right,bottom_right,bottom_left]
+
+        traced_pixel = path.Path(vertices)
+
+        # compute bounding box
+        x_min = min([v[0] for v in vertices])
+        y_min = min([v[1] for v in vertices])
+        x_max = max([v[0] for v in vertices])
+        y_max = max([v[1] for v in vertices])
+
+        y_index_range = [np.where(y-y_max > 0, y-y_max, np.inf).argmin(),np.where(y_min-y > 0, y_min-y, np.inf).argmin()]
+        x_index_range = [np.where(x_min-x > 0, x_min-x, np.inf).argmin(),np.where(x-x_max > 0, x-x_max, np.inf).argmin()]
+
+        image_slice = source_image[y_index_range[0]:y_index_range[1]+1,x_index_range[0]:x_index_range[1]+1]
+        if image_slice.size == 0:
+            lum[r] = 0
+        else:
+            source_plane_slice = source_plane[y_index_range[0]:y_index_range[1]+1,x_index_range[0]:x_index_range[1]+1]
+            source_points = np.reshape(source_plane_slice,(-1,2))
+
+            index = traced_pixel.contains_points(source_points)
+            luminosity_values = image_slice.flatten()[index]
+            if len(luminosity_values) == 0:
+                lum[r] = 0
+            else:
+                lum[r] = np.mean(luminosity_values)
+    
+    return lum
+
 def lens_image(source_image,source_grid,traced_corners_grid,func=np.mean):
     """
     Compute the lensed image of a source image.

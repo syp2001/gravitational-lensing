@@ -391,7 +391,9 @@ def lens_image(source_image,source_grid,traced_corners_grid,func=np.mean):
             if len(luminosity_values) == 0:
                 image[i,j] = 0
             else:
-                image[i,j] = func(luminosity_values)
+                source_pixel_area = abs((x[1] - x[0]) * (y[1] - y[0]))
+                polygon_area = abs(np.linalg.det([top_left-bottom_left, top_right-bottom_left]))
+                image[i,j] = np.sum(luminosity_values)*source_pixel_area/polygon_area
     
     return image
 
@@ -449,7 +451,7 @@ def magnification_line(magnification_grid, magnification_values, image_plane,thr
     image_plane_magnification = magnification(magnification_grid, magnification_values, image_plane)
     return image_plane_points[image_plane_magnification.flatten() > threshold]
 
-def caustic(deflections_grid,x_deflections,y_deflections,magnification_grid, magnification_values, image_plane,z1, z2,threshold=500):
+def caustic(deflections_grid,x_deflections,y_deflections,magnification_grid, magnification_values, image_plane,z1=None, z2=None,threshold=500):
     """
     Compute the caustic curve of a lens.
 
@@ -466,7 +468,10 @@ def caustic(deflections_grid,x_deflections,y_deflections,magnification_grid, mag
     magnification_line_points = magnification_line(magnification_grid, magnification_values, image_plane,threshold=threshold)
 
     # compute deflection angle scale factor
-    scale_factor = deflection_angle_scale_factor(z1,z2)
+    if z1 is not None and z2 is not None:
+        scale_factor = deflection_angle_scale_factor(z1,z2)
+    else:
+        scale_factor = 1
 
     # convert coordinate grids into list of points
     deflections_grid_points = list_of_points_from_grid(deflections_grid)

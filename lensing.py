@@ -391,9 +391,7 @@ def lens_image(source_image,source_grid,traced_corners_grid,func=np.mean):
             if len(luminosity_values) == 0:
                 image[i,j] = 0
             else:
-                source_pixel_area = abs((x[1] - x[0]) * (y[1] - y[0]))
-                polygon_area = abs(np.linalg.det([top_left-bottom_left, top_right-bottom_left]))
-                image[i,j] = np.sum(luminosity_values)*source_pixel_area/polygon_area
+                image[i,j] = np.mean(luminosity_values)
     
     return image
 
